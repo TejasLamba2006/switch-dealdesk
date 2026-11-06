@@ -1,0 +1,167 @@
+version: 2
+
+params:
+  company:
+    type: string
+    label: Company slug
+    description: Prefix for rooms, agents, and the procurement group.
+    default: acme
+  bridge:
+    type: bridge
+    label: Messaging app
+    description: Collaboration bridge where the vendor intake and internal war room channels are created.
+    default: [Mattermost, Slack, $first]
+    required: false
+  provider:
+    type: provider
+    description: Coding agent runtime for the procurement agents.
+    default: [claude, codex, opencode]
+    input: advanced
+  machine:
+    type: machine
+    description: Machine hosting the agent sessions.
+    default: [$first]
+    input: advanced
+  directory:
+    type: directory
+    description: Working directory on the agent host.
+    default: "{$agents_dir}/{company}-dealdesk"
+    input: advanced
+
+form:
+  advanced: { label: Advanced, open: false }
+
+resources:
+  intake_concierge:
+    type: agent
+    name: "{company}-intake-concierge"
+    display_name: "{company} Intake Concierge"
+    description: Parses vendor MSAs and pricing quotes in the public intake room and notifies the internal deal desk.
+    provider: "{provider}"
+    machine: "{machine}"
+    directory: "{directory}"
+    addressing: anyone
+    instructions: |
+      You are the front-door procurement concierge in {vendor_intake.name}.
+      When an external vendor posts a quote or MSA:
+      1. Extract line items, seat count, annual commitment, auto-renewal window, and subprocessor clauses.
+      2. Post a concise receipt in {vendor_intake.name} without revealing any internal budget or margin numbers.
+      3. Hand the parsed quote to @{finance_auditor.name} and @{secops_reviewer.name} in {internal_war_room.name}.
+
+  finance_auditor:
+    type: agent
+    name: "{company}-finance-auditor"
+    display_name: "{company} Finance Auditor"
+    description: Cross-reads vendor quotes from intake, compares against the CFO budget mandate, and computes target counter-offers.
+    provider: "{provider}"
+    machine: "{machine}"
+    directory: "{directory}"
+    addressing: owner-agents
+    instructions: |
+      You operate exclusively inside {internal_war_room.name}.
+      1. Read the CFO's single-writer 'cfo-budget-mandate' room document via load_internal_documents.
+      2. Cross-read the vendor quote in {vendor_intake.name} via read_context(room_id=...) without posting in {vendor_intake.name}.
+      3. Post TCO math, variance against the CFO ceiling, and target discount terms in {internal_war_room.name}.
+
+  secops_reviewer:
+    type: agent
+    name: "{company}-secops-reviewer"
+    display_name: "{company} SecOps Reviewer"
+    description: Assumes the shared compliance-reviewer role to audit SOC2, DPA, data residency, and breach notification windows.
+    provider: "{provider}"
+    machine: "{machine}"
+    directory: "{directory}"
+    addressing: owner-agents
+    instructions: |
+      You operate inside {internal_war_room.name}.
+      1. Assume the shared 'compliance-reviewer' role before running an audit.
+      2. Cross-read the vendor's MSA in {vendor_intake.name} via read_context(room_id=...).
+      3. Flag any breach notification window > 48h, uncapped subprocessor additions, or non-EU/US data residency.
+
+  legal_redliner:
+    type: agent
+    name: "{company}-legal-redliner"
+    display_name: "{company} Legal Redliner"
+    description: Holds the exclusive signatory-gate lease, maintains the single-writer risk ledger, and posts counter-offers only after verified human CFO sign-off.
+    provider: "{provider}"
+    machine: "{machine}"
+    directory: "{directory}"
+    addressing: owner-agents
+    instructions: |
+      You coordinate contract redlines in {internal_war_room.name}.
+      1. Assume the exclusive 'signatory-gate' role before drafting a counter-offer.
+      2. Create and update the 'risk-and-redline-ledger' room document (single-writer owned by you).
+      3. Upload the redlined MSA diff attachment, schedule a 48h renewal check via create_schedule, and stop at the CFO approval gate.
+      4. Verify via list_participants that 'Approved. Send counter-offer.' came from the room's human owner ({$creator}) before posting the sanitized counter-offer to {vendor_intake.name}.
+
+  procurement_group:
+    type: group
+    name: "{company}-procurement"
+    description: Linked public vendor intake and private internal deal desk rooms.
+    links:
+      - from: vendor_intake
+        to: internal_war_room
+        label: escalates-quote-to
+
+  vendor_intake:
+    type: room
+    group: procurement_group
+    name: "{company}-vendor-intake"
+    description: External-facing vendor quote and MSA drop room.
+    channel_type: channel_public
+    bridge: "{bridge}"
+    agents:
+      - intake_concierge
+      - finance_auditor
+      - secops_reviewer
+      - legal_redliner
+    users:
+      - if: "{bridge}"
+        value: ["{$creator}"]
+      - value: []
+    instructions: |
+      External vendor intake room. Vendors post quotes and MSAs here.
+      Internal budget ceilings, walk-away prices, and unpublished redlines must never be posted in this room.
+    kickoff: |
+      @{intake_concierge.name} ready to receive vendor quotes and MSA packages in {vendor_intake.name}.
+
+  internal_war_room:
+    type: room
+    group: procurement_group
+    name: "{company}-internal-deal-desk"
+    description: Private internal procurement, security, and legal war room with CFO sign-off gate.
+    channel_type: channel_private
+    bridge: "{bridge}"
+    agents:
+      - intake_concierge
+      - finance_auditor
+      - secops_reviewer
+      - legal_redliner
+    users:
+      - if: "{bridge}"
+        value: ["{$creator}"]
+      - value: []
+    instructions: |
+      Private internal deal desk linked to {vendor_intake.name}.
+      Cross-read vendor submissions from {vendor_intake.name} via read_context(room_id=...).
+      No counter-offer leaves this room until {$creator} posts 'Approved. Send counter-offer.'
+    roles:
+      - name: signatory-gate
+        instructions: Exclusive lease required to assemble final contract redlines and dispatch a counter-offer.
+        exclusive: true
+      - name: compliance-reviewer
+        instructions: Shared role held by security and compliance auditors inspecting vendor DPAs.
+        exclusive: false
+    docs:
+      - name: cfo-budget-mandate
+        description: Hard annual budget ceiling, maximum uplift cap, and mandatory legal terms authored by the human CFO.
+        instructions: Read before evaluating any vendor quote. Single-writer owned by the human creator; agents cannot modify this document.
+        content: |
+          # CFO Procurement Mandate (FY2026)
+          - Maximum Annual Contract Value (ACV): $42,000 / year (up to 150 seats)
+          - Walk-Away Per-Seat Ceiling: $280 / seat / year
+          - Auto-Renewal Notice Floor: 60 days minimum; cap renewal uplift at <= 3%
+          - Security & DPA Requirements: SOC2 Type II required; breach notification <= 48 hours; prior written notice for new subprocessors
+          - Liability Cap: Minimum 2x annual fees for data breach and IP indemnity
+    kickoff: |
+      @{finance_auditor.name} @{secops_reviewer.name} @{legal_redliner.name}: internal deal desk initialized. Read 'cfo-budget-mandate' and stand by for intake from {vendor_intake.name}.
